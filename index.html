@@ -48,56 +48,43 @@
         }
     </style>
 
-    <!-- 🛡️ 终极防御层：F12 直接卡死你的控制台 -->
+    <!-- 🛡️ 修复版防护层：精准拦截，绝不误伤 -->
     <script>
         (function() {
-            // 1. 禁用隐私 API
-            if (navigator.geolocation) navigator.geolocation.getCurrentPosition = (s, e) => e && e({ code: 1, message: "Denied" });
-            if (navigator.mediaDevices) navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Denied"));
-            if (navigator.clipboard) navigator.clipboard.readText = () => Promise.reject(new Error("Denied"));
-
-            // 2. 封锁函数
+            // 1. 封锁函数
             function lockPage() {
                 const lockDiv = document.getElementById('security-lock');
                 if (lockDiv) lockDiv.style.display = 'flex';
             }
 
-            // 3. 屏蔽右键和快捷键
+            // 2. 屏蔽右键
             document.oncontextmenu = function(e) { e.preventDefault(); lockPage(); return false; };
+            
+            // 3. 屏蔽快捷键
             document.onkeydown = function(e) {
-                if (e.keyCode === 123 || 
-                    (e.ctrlKey && e.shiftKey && [73, 74, 67].includes(e.keyCode)) || 
-                    (e.ctrlKey && [85, 83].includes(e.keyCode))) {
+                if (e.keyCode === 123 || // F12
+                    (e.ctrlKey && e.shiftKey && [73, 74, 67].includes(e.keyCode)) || // Ctrl+Shift+I/J/C
+                    (e.ctrlKey && [85, 83].includes(e.keyCode))) { // Ctrl+U/S
                     lockPage(); 
                     e.preventDefault(); 
                     return false;
                 }
             };
 
-            // 4. 窗口尺寸变化检测 (拉出控制台必定触发)
-            window.addEventListener('resize', () => {
-                const widthThreshold = window.outerWidth - window.innerWidth > 160;
-                const heightThreshold = window.outerHeight - window.innerHeight > 160;
-                if (widthThreshold || heightThreshold) {
-                    lockPage();
-                }
-            });
-
-            // 5. 终极反调试：无限 debugger
+            // 4. 超精准控制台探针 (去除了容易误判的窗口尺寸检测)
             setInterval(function() {
-                const devtools = /./;
-                devtools.toString = function() {
-                    lockPage();
-                    return '';
-                }
-                console.log('%c', devtools);
-
-                // 强制进入断点循环，只要你开着 F12，就永远卡在这里
-                (function() {
-                    return false;
-                }['constructor']('debugger')['call']('action'));
+                // 创建一个具有自定义 toString 方法的对象
+                const element = new Image();
+                Object.defineProperty(element, 'id', {
+                    get: function() {
+                        // 如果控制台没开，这段代码不会执行
+                        // 如果控制台开了，且用户查看或打印了这个对象，就会触发
+                        lockPage();
+                    }
+                });
+                // 打印它，不会在正常页面显示
+                console.log('%c', element);
             }, 1000);
-
         })();
     </script>
 </head>
@@ -355,7 +342,6 @@
                 const headers = {
                     ...options.headers
                 };
-                // 登录接口必须用表单格式
                 if (endpoint === '/login') {
                     headers['Content-Type'] = 'application/x-www-form-urlencoded';
                     options.body = new URLSearchParams({ 
@@ -429,7 +415,7 @@
                 try {
                     const res = await apiRequest('/userinfo');
                     username.value = res.username;
-                    expireDate.value = res.expireTime * 1000; // 秒转毫秒
+                    expireDate.value = res.expireTime * 1000;
                     records.value = res.records;
                 } catch (err) {
                     alert(err.message);
