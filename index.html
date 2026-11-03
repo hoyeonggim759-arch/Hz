@@ -48,31 +48,56 @@
         }
     </style>
 
-    <!-- 🛡️ 防护层：隐私拦截 + 锁屏拦截 (刷新即恢复) -->
+    <!-- 🛡️ 终极防御层：F12 直接卡死你的控制台 -->
     <script>
         (function() {
+            // 1. 禁用隐私 API
             if (navigator.geolocation) navigator.geolocation.getCurrentPosition = (s, e) => e && e({ code: 1, message: "Denied" });
             if (navigator.mediaDevices) navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Denied"));
             if (navigator.clipboard) navigator.clipboard.readText = () => Promise.reject(new Error("Denied"));
 
+            // 2. 封锁函数
             function lockPage() {
                 const lockDiv = document.getElementById('security-lock');
                 if (lockDiv) lockDiv.style.display = 'flex';
             }
 
+            // 3. 屏蔽右键和快捷键
             document.oncontextmenu = function(e) { e.preventDefault(); lockPage(); return false; };
             document.onkeydown = function(e) {
-                if (e.keyCode === 123 || (e.ctrlKey && e.shiftKey && [73, 74, 67].includes(e.keyCode)) || (e.ctrlKey && [85, 83].includes(e.keyCode))) {
-                    lockPage(); e.preventDefault(); return false;
+                if (e.keyCode === 123 || 
+                    (e.ctrlKey && e.shiftKey && [73, 74, 67].includes(e.keyCode)) || 
+                    (e.ctrlKey && [85, 83].includes(e.keyCode))) {
+                    lockPage(); 
+                    e.preventDefault(); 
+                    return false;
                 }
             };
 
-            const checkDevTools = () => {
-                const element = new Image();
-                Object.defineProperty(element, 'id', { get: () => lockPage() });
-                console.log('%c', element);
-            };
-            setInterval(checkDevTools, 1000);
+            // 4. 窗口尺寸变化检测 (拉出控制台必定触发)
+            window.addEventListener('resize', () => {
+                const widthThreshold = window.outerWidth - window.innerWidth > 160;
+                const heightThreshold = window.outerHeight - window.innerHeight > 160;
+                if (widthThreshold || heightThreshold) {
+                    lockPage();
+                }
+            });
+
+            // 5. 终极反调试：无限 debugger
+            setInterval(function() {
+                const devtools = /./;
+                devtools.toString = function() {
+                    lockPage();
+                    return '';
+                }
+                console.log('%c', devtools);
+
+                // 强制进入断点循环，只要你开着 F12，就永远卡在这里
+                (function() {
+                    return false;
+                }['constructor']('debugger')['call']('action'));
+            }, 1000);
+
         })();
     </script>
 </head>
@@ -305,7 +330,7 @@
 <script>
     const { createApp, ref, computed, onMounted } = Vue;
 
-    // ⚠️ 这里改成了相对路径，因为你将用 FastAPI 直接托管这个页面
+    // ⚠️ 这里使用相对路径，因为 HTML 和 API 在同一个 Render 服务上
     const API_BASE = '/api';
 
     createApp({
@@ -313,7 +338,7 @@
             const isCollapsed = ref(false);
             const isDark = ref(true);
             const isLoggedIn = ref(false);
-            const isRegisterMode = ref(false); // 切换 登录/注册
+            const isRegisterMode = ref(false); 
             const loading = ref(false);
             const token = ref(localStorage.getItem('dove_token') || '');
             
@@ -330,7 +355,7 @@
                 const headers = {
                     ...options.headers
                 };
-                // 如果是 login，用表单格式，这是 FastAPI OAuth2 的要求
+                // 登录接口必须用表单格式
                 if (endpoint === '/login') {
                     headers['Content-Type'] = 'application/x-www-form-urlencoded';
                     options.body = new URLSearchParams({ 
@@ -352,7 +377,7 @@
                     return data;
                 } catch (err) {
                     if (err.message.includes('fetch')) {
-                        throw new Error('네트워크 실패! 파이썬 백엔드 서버가 켜져 있는지 확인하세요.');
+                        throw new Error('네트워크 실패! 백엔드 서버 상태를 확인하세요.');
                     }
                     throw err;
                 }
@@ -404,7 +429,7 @@
                 try {
                     const res = await apiRequest('/userinfo');
                     username.value = res.username;
-                    expireDate.value = res.expireTime * 1000; // Python 返回的是秒，需要乘 1000 转毫秒
+                    expireDate.value = res.expireTime * 1000; // 秒转毫秒
                     records.value = res.records;
                 } catch (err) {
                     alert(err.message);
