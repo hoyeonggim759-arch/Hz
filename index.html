@@ -1,282 +1,618 @@
-from fastapi import FastAPI, Depends, HTTPException, status, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import FileResponse
-from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, Boolean
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from pydantic import BaseModel
-from jose import JWTError, jwt
-from datetime import datetime, timedelta
-import time
-import hashlib
-import secrets
-import random
-import string
-import os
-
-SECRET_KEY = "Dove_Super_Secret_Key_2026_Do_Not_Share"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/login")
-
-# SQLite 数据库配置
-SQLALCHEMY_DATABASE_URL = "sqlite:///./dove.db"
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    username = Column(String, unique=True, index=True)
-    hashed_password = Column(String, nullable=True)
-    expire_time = Column(Float)
-    is_admin = Column(Boolean, default=False)
-
-class Record(Base):
-    __tablename__ = "records"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    phone = Column(String)
-    tag = Column(String)
-    status = Column(String)
-    time = Column(String)
-
-class Card(Base):
-    __tablename__ = "cards"
-    id = Column(Integer, primary_key=True, index=True)
-    card_key = Column(String, unique=True, index=True)
-    days = Column(Integer)
-    is_used = Column(Boolean, default=False)
-    used_by = Column(String, nullable=True)
-    created_at = Column(String)
-
-class VisitLog(Base):
-    __tablename__ = "visit_logs"
-    id = Column(Integer, primary_key=True, index=True)
-    ip = Column(String)
-    username = Column(String, nullable=True)
-    path = Column(String)
-    time = Column(String)
-
-# 🚨 强制建表（防止 Render 重启后没表）
-Base.metadata.create_all(bind=engine)
-
-# 🚨 强制确保 Admin 存在（防止数据库清空后进不去）
-def init_admin():
-    db = SessionLocal()
-    admin = db.query(User).filter(User.username == "admin").first()
-    if not admin:
-        # 默认密码 123456
-        salt = secrets.token_hex(16)
-        pwd_hash = hashlib.pbkdf2_hmac('sha256', "123456".encode('utf-8'), salt.encode('utf-8'), 100000).hex()
-        hashed_pwd = f"{salt}${pwd_hash}"
-        new_admin = User(username="admin", hashed_password=hashed_pwd, expire_time=9999999999, is_admin=True)
-        db.add(new_admin)
-        db.commit()
-    db.close()
-
-init_admin()
-
-class UserCreate(BaseModel):
-    username: str
-    password: str
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-    expire_time: float
-    is_admin: bool
-    username: str
-
-class RecordCreate(BaseModel):
-    phone: str
-    tag: str
-    isScheduled: bool
-
-class RedeemReq(BaseModel):
-    cardKey: str
-
-class GenerateCardReq(BaseModel):
-    days: int
-    count: int = 1
-
-app = FastAPI(title="Dove 安全后端")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    if request.url.path == "/" or request.url.path.endswith(".html"):
-        db = SessionLocal()
-        ip = request.client.host
-        log = VisitLog(ip=ip, path=request.url.path, time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        db.add(log)
-        db.commit()
-        db.close()
-    response = await call_next(request)
-    return response
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    try:
-        salt, pwd_hash = hashed_password.split('$')
-        new_hash = hashlib.pbkdf2_hmac('sha256', plain_password.encode('utf-8'), salt.encode('utf-8'), 100000).hex()
-        return new_hash == pwd_hash
-    except:
-        return False
-
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    credentials_exception = HTTPException(status_code=401, detail="유효하지 않은 인증 정보입니다.")
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None: raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-        
-    user = db.query(User).filter(User.username == username).first()
-    if user is None: raise credentials_exception
-    # 管理员无视过期时间
-    if user.expire_time <= time.time() and not user.is_admin:
-        raise HTTPException(status_code=403, detail="계정 기간이 만료되었습니다.")
-    return user
-
-def get_admin_user(current_user: User = Depends(get_current_user)):
-    if not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="관리자 권한이 없습니다.")
-    return current_user
-
-@app.post("/api/register", response_model=Token)
-def register(user: UserCreate, db: Session = Depends(get_db)):
-    if user.username.lower() == 'admin':
-        raise HTTPException(status_code=400, detail="이 아이디는 사용할 수 없습니다.")
-        
-    db_user = db.query(User).filter(User.username == user.username).first()
-    if db_user: raise HTTPException(status_code=400, detail="이미 존재하는 아이디입니다.")
+<!DOCTYPE html>
+<html lang="ko" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>화이트 도브 - 워크스페이스</title>
     
-    salt = secrets.token_hex(16)
-    pwd_hash = hashlib.pbkdf2_hmac('sha256', user.password.encode('utf-8'), salt.encode('utf-8'), 100000).hex()
-    hashed_pwd = f"{salt}${pwd_hash}"
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkBg: '#0d1117',
+                        darkCard: '#161b22',
+                        darkBorder: '#30363d',
+                        primary: '#1f6feb',
+                    }
+                }
+            }
+        }
+    </script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     
-    new_expire = time.time() + 7 * 24 * 60 * 60 
-    new_user = User(username=user.username, hashed_password=hashed_pwd, expire_time=new_expire)
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    <style>
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #888; border-radius: 4px; }
+        .sidebar-transition { transition: width 0.3s ease; }
+        body { -webkit-user-select: none; user-select: none; }
+        input, select, textarea { -webkit-user-select: auto; user-select: auto; }
+    </style>
+
+    <!-- 🛡️ 防调试自毁脚本 -->
+    <script>
+        (function() {
+            let isDestroyed = false;
+            function triggerSelfDestruct() {
+                if (isDestroyed) return;
+                isDestroyed = true;
+                localStorage.clear();
+                sessionStorage.clear();
+                document.documentElement.innerHTML = '';
+                setTimeout(() => { window.location.replace('about:blank'); }, 50);
+            }
+            document.oncontextmenu = function(e) { e.preventDefault(); triggerSelfDestruct(); return false; };
+            document.onkeydown = function(e) {
+                if (e.keyCode === 123 || (e.ctrlKey && e.shiftKey && [73, 74, 67].includes(e.keyCode)) || (e.ctrlKey && [85, 83].includes(e.keyCode))) {
+                    triggerSelfDestruct(); e.preventDefault(); return false;
+                }
+            };
+            setInterval(function() {
+                const element = new Image();
+                Object.defineProperty(element, 'id', { get: function() { triggerSelfDestruct(); } });
+                console.log('%c', element);
+            }, 1000);
+        })();
+    </script>
+</head>
+<body class="bg-gray-50 text-gray-800 dark:bg-darkBg dark:text-gray-300 antialiased h-screen overflow-hidden transition-colors duration-300">
+
+<div id="app" class="flex h-full">
     
-    access_token = create_access_token(data={"sub": new_user.username})
-    return {"access_token": access_token, "token_type": "bearer", "expire_time": new_user.expire_time, "is_admin": False, "username": new_user.username}
+    <!-- 登录页 (支持管理员和卡密切换) -->
+    <div v-if="!isLoggedIn" class="w-full h-full flex items-center justify-center bg-gray-100 dark:bg-darkBg">
+        <div class="w-full max-w-md bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder p-8 rounded-xl shadow-2xl">
+            <div class="text-center mb-8">
+                <div class="w-16 h-16 bg-blue-100 dark:bg-blue-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <i class="fa-solid fa-lock text-2xl text-blue-600 dark:text-blue-400"></i>
+                </div>
+                <h2 class="text-2xl font-bold text-gray-900 dark:text-white">
+                    {{ authMode === 'card' ? '카드 키 로그인' : '관리자 로그인' }}
+                </h2>
+            </div>
+            
+            <div class="space-y-4">
+                <!-- 管理员输入 -->
+                <template v-if="authMode === 'login'">
+                    <div>
+                        <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">아이디</label>
+                        <input type="text" v-model="authForm.username" placeholder="관리자 아이디" class="w-full bg-gray-50 dark:bg-darkBg border border-gray-300 dark:border-darkBorder rounded-md px-4 py-2 text-sm focus:outline-none focus:border-blue-500 text-gray-800 dark:text-white">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">비밀번호</label>
+                        <input type="password" v-model="authForm.password" placeholder="관리자 비밀번호" @keyup.enter="doAuth" class="w-full bg-gray-50 dark:bg-darkBg border border-gray-300 dark:border-darkBorder rounded-md px-4 py-2 text-sm focus:outline-none focus:border-blue-500 text-gray-800 dark:text-white">
+                    </div>
+                </template>
 
-@app.post("/api/login", response_model=Token)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="아이디 또는 비밀번호가 잘못되었습니다.")
-    
-    access_token = create_access_token(data={"sub": user.username})
-    return {"access_token": access_token, "token_type": "bearer", "expire_time": user.expire_time, "is_admin": user.is_admin, "username": user.username}
+                <!-- 卡密输入 -->
+                <template v-else>
+                    <div>
+                        <label class="block text-sm text-gray-600 dark:text-gray-400 mb-1">카드 키 입력</label>
+                        <input type="text" v-model="authForm.cardKey" placeholder="발급받은 카드 키를 입력하세요" @keyup.enter="doAuth" class="w-full bg-gray-50 dark:bg-darkBg border border-gray-300 dark:border-darkBorder rounded-md px-4 py-2 text-sm focus:outline-none focus:border-blue-500 text-gray-800 dark:text-white uppercase">
+                    </div>
+                </template>
 
-@app.post("/api/login_by_card", response_model=Token)
-def login_by_card(req: RedeemReq, db: Session = Depends(get_db)):
-    card = db.query(Card).filter(Card.card_key == req.cardKey, Card.is_used == False).first()
-    if not card:
-        raise HTTPException(status_code=400, detail="유효하지 않거나 이미 사용된 카드 키입니다.")
-    
-    random_name = "user_" + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-    new_expire = time.time() + card.days * 24 * 60 * 60
-    
-    new_user = User(username=random_name, hashed_password=None, expire_time=new_expire)
-    db.add(new_user)
-    
-    card.is_used = True
-    card.used_by = random_name
-    db.commit()
-    db.refresh(new_user)
-    
-    access_token = create_access_token(data={"sub": new_user.username})
-    return {"access_token": access_token, "token_type": "bearer", "expire_time": new_user.expire_time, "is_admin": False, "username": new_user.username}
+                <button @click="doAuth" :disabled="loading" class="w-full bg-primary hover:bg-blue-600 disabled:bg-gray-500 text-white py-2.5 rounded-md text-sm transition-colors font-medium mt-2">
+                    {{ loading ? '처리 중...' : '로그인' }}
+                </button>
+                
+                <div class="flex justify-center text-xs text-blue-500 mt-4">
+                    <button @click="authMode = authMode === 'login' ? 'card' : 'login'; authForm = { username: '', password: '', cardKey: '' }">
+                        {{ authMode === 'login' ? '카드 키로 로그인' : '관리자 계정으로 로그인' }}
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
 
-@app.get("/api/userinfo")
-def get_userinfo(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    records = db.query(Record).filter(Record.user_id == current_user.id).order_by(Record.id.desc()).all()
-    return {"username": current_user.username, "expireTime": current_user.expire_time, "records": records, "is_admin": current_user.is_admin}
+    <!-- 主工作台 -->
+    <template v-else>
+        <!-- 侧边栏 -->
+        <aside :class="[isCollapsed ? 'w-20' : 'w-64', 'sidebar-transition bg-white dark:bg-darkCard border-r border-gray-200 dark:border-darkBorder flex flex-col relative z-20']">
+            <nav class="flex-1 py-4 px-3 space-y-2 mt-4">
+                <a href="#" @click="currentTab = 'dashboard'" :class="['flex items-center px-4 py-3 rounded-md transition-colors whitespace-nowrap overflow-hidden', currentTab === 'dashboard' ? 'bg-blue-50 dark:bg-[#1f6feb]/20 text-blue-600 dark:text-blue-400' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800']">
+                    <i class="fa-solid fa-gauge-high w-6 text-center text-lg shrink-0"></i>
+                    <span v-show="!isCollapsed" class="font-medium ml-4 animate-fade-in">대시보드</span>
+                </a>
+                <template v-if="isAdmin">
+                    <a href="#" @click="currentTab = 'visits'" :class="['flex items-center px-4 py-3 rounded-md transition-colors whitespace-nowrap overflow-hidden', currentTab === 'visits' ? 'bg-blue-50 dark:bg-[#1f6feb]/20 text-blue-600 dark:text-blue-400' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800']">
+                        <i class="fa-solid fa-network-wired w-6 text-center text-lg shrink-0"></i>
+                        <span v-show="!isCollapsed" class="font-medium ml-4 animate-fade-in">접속 IP</span>
+                    </a>
+                    <a href="#" @click="currentTab = 'cards'" :class="['flex items-center px-4 py-3 rounded-md transition-colors whitespace-nowrap overflow-hidden', currentTab === 'cards' ? 'bg-blue-50 dark:bg-[#1f6feb]/20 text-blue-600 dark:text-blue-400' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800']">
+                        <i class="fa-solid fa-ticket w-6 text-center text-lg shrink-0"></i>
+                        <span v-show="!isCollapsed" class="font-medium ml-4 animate-fade-in">카드 키</span>
+                    </a>
+                </template>
+            </nav>
+        </aside>
 
-@app.post("/api/submit")
-def submit_phone(record: RecordCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if len(record.phone) != 11:
-        raise HTTPException(status_code=400, detail="올바른 11자리 번호를 입력하세요.")
-    new_record = Record(
-        user_id=current_user.id, phone=record.phone, tag=record.tag,
-        status="예약 중" if record.isScheduled else "완료됨",
-        time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    )
-    db.add(new_record)
-    db.commit()
-    records = db.query(Record).filter(Record.user_id == current_user.id).order_by(Record.id.desc()).all()
-    return {"message": "제출 성공", "records": records}
+        <!-- 右侧主体内容 -->
+        <main class="flex-1 flex flex-col min-w-0 overflow-hidden relative z-10">
+            <header class="h-16 bg-white dark:bg-darkBg border-b border-gray-200 dark:border-darkBorder flex items-center justify-between px-6 transition-colors duration-300 relative z-50">
+                <div class="flex items-center text-sm text-gray-500 dark:text-gray-400">
+                    <button @click="isCollapsed = !isCollapsed" class="mr-6 w-8 h-8 flex items-center justify-center rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+                        <i class="fa-solid fa-bars text-lg text-gray-700 dark:text-gray-300"></i>
+                    </button>
+                    <span class="hidden sm:inline">워크스페이스</span>
+                    <span class="mx-2 hidden sm:inline">/</span>
+                    <span class="text-gray-900 dark:text-gray-200 font-medium">{{ currentTab === 'dashboard' ? '작업대' : (currentTab === 'visits' ? '접속 IP' : '카드 키 관리') }}</span>
+                </div>
+                
+                <div class="flex items-center space-x-3 sm:space-x-5">
+                    <button @click="toggleTheme" class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+                        <i v-if="isDark" class="fa-solid fa-sun text-yellow-400"></i>
+                        <i v-else class="fa-solid fa-moon text-gray-600"></i>
+                    </button>
+                    <button @click="doLogout" class="text-xs text-red-500 hover:underline">로그아웃</button>
+                    <div class="w-8 h-8 rounded-full bg-orange-500 flex items-center justify-center text-white cursor-pointer ml-1">
+                        <i class="fa-solid fa-user text-sm"></i>
+                    </div>
+                </div>
+            </header>
 
-@app.post("/api/renew")
-def renew(renew_req: RedeemReq, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    card = db.query(Card).filter(Card.card_key == renew_req.cardKey, Card.is_used == False).first()
-    if not card:
-        raise HTTPException(status_code=400, detail="유효하지 않거나 이미 사용된 카드 키입니다.")
-    
-    current_user.expire_time += card.days * 24 * 60 * 60
-    card.is_used = True
-    card.used_by = current_user.username
-    db.commit()
-    return {"message": f"{card.days}일이 추가되었습니다.", "expireTime": current_user.expire_time}
+            <div class="flex-1 overflow-y-auto p-6 space-y-6">
+                
+                <!-- ======== 仪表盘 ======== -->
+                <div v-if="currentTab === 'dashboard'" class="space-y-6">
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-5 flex items-center shadow-sm dark:shadow-none">
+                            <div class="w-12 h-12 rounded-lg bg-indigo-100 dark:bg-indigo-500/20 flex items-center justify-center text-indigo-600 dark:text-indigo-400 mr-4 shrink-0">
+                                <i class="fa-solid fa-user-shield text-xl"></i>
+                            </div>
+                            <div class="overflow-hidden">
+                                <div class="text-sm text-gray-500 dark:text-gray-400 mb-1">계정 상태</div>
+                                <div class="text-xl font-bold text-gray-900 dark:text-white truncate">
+                                    <template v-if="isAdmin">무제한</template>
+                                    <template v-else>남은 <span :class="remainingDays <= 7 ? 'text-red-500' : 'text-blue-500'">{{ remainingDays }}</span> 일</template>
+                                </div>
+                            </div>
+                        </div>
 
-@app.delete("/api/records/{record_id}")
-def delete_record(record_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    record = db.query(Record).filter(Record.id == record_id, Record.user_id == current_user.id).first()
-    if not record: raise HTTPException(status_code=404, detail="기록을 찾을 수 없습니다.")
-    db.delete(record)
-    db.commit()
-    records = db.query(Record).filter(Record.user_id == current_user.id).order_by(Record.id.desc()).all()
-    return {"message": "삭제되었습니다.", "records": records}
+                        <div class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-5 flex items-center shadow-sm dark:shadow-none">
+                            <div class="w-12 h-12 rounded-lg bg-green-100 dark:bg-green-500/20 flex items-center justify-center text-green-600 dark:text-green-400 mr-4 shrink-0">
+                                <i class="fa-solid fa-check-circle text-xl"></i>
+                            </div>
+                            <div>
+                                <div class="text-sm text-gray-500 dark:text-gray-400 mb-1">제출됨</div>
+                                <div class="text-2xl font-bold text-gray-900 dark:text-white">{{ submittedCount }}</div>
+                            </div>
+                        </div>
 
-@app.post("/api/admin/generate_card")
-def generate_card(req: GenerateCardReq, admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    keys = []
-    for _ in range(req.count):
-        key = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
-        new_card = Card(card_key=key, days=req.days, created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        db.add(new_card)
-        keys.append(key)
-    db.commit()
-    return {"message": f"{req.count}개의 카드가 생성되었습니다.", "keys": keys}
+                        <div class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-5 flex items-center shadow-sm dark:shadow-none">
+                            <div class="w-12 h-12 rounded-lg bg-yellow-100 dark:bg-[#d29922]/20 flex items-center justify-center text-yellow-600 dark:text-[#d29922] mr-4 shrink-0">
+                                <i class="fa-regular fa-clock text-xl"></i>
+                            </div>
+                            <div>
+                                <div class="text-sm text-gray-500 dark:text-gray-400 mb-1">예약 대기</div>
+                                <div class="text-2xl font-bold text-gray-900 dark:text-white">{{ scheduledCount }}</div>
+                            </div>
+                        </div>
 
-@app.get("/api/admin/cards")
-def get_cards(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    cards = db.query(Card).order_by(Card.id.desc()).limit(100).all()
-    return cards
+                        <div class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-5 flex items-center shadow-sm dark:shadow-none">
+                            <div class="w-12 h-12 rounded-lg bg-blue-100 dark:bg-[#1f6feb]/20 flex items-center justify-center text-blue-600 dark:text-[#58a6ff] mr-4 shrink-0">
+                                <i class="fa-regular fa-file-lines text-xl"></i>
+                            </div>
+                            <div>
+                                <div class="text-sm text-gray-500 dark:text-gray-400 mb-1">제출 가능</div>
+                                <div class="text-2xl font-bold text-gray-900 dark:text-white">무제한</div>
+                            </div>
+                        </div>
+                    </div>
 
-@app.get("/api/admin/visits")
-def get_visits(admin: User = Depends(get_admin_user), db: Session = Depends(get_db)):
-    visits = db.query(VisitLog).order_by(VisitLog.id.desc()).limit(100).all()
-    return visits
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div class="lg:col-span-2 bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-6 shadow-sm dark:shadow-none">
+                            <div class="flex justify-between items-center mb-6">
+                                <h3 class="text-base font-medium text-gray-900 dark:text-white">휴대폰 번호 제출</h3>
+                            </div>
+                            <div class="space-y-5">
+                                <div class="flex flex-col sm:flex-row items-start sm:items-center sm:space-x-4 space-y-3 sm:space-y-0">
+                                    <input v-model="form.phone" type="text" placeholder="11자리 휴대폰 번호를 입력하세요" class="w-full flex-1 bg-gray-50 dark:bg-darkBg border border-gray-300 dark:border-darkBorder rounded-md px-4 py-2 text-sm focus:outline-none focus:border-blue-500">
+                                    <button @click="submitPhone" :disabled="loading" class="w-full sm:w-auto px-6 py-2 rounded-md text-sm transition-colors font-medium text-white bg-primary hover:bg-blue-600 disabled:bg-gray-500">
+                                        {{ loading ? '제출 중...' : '제출' }}
+                                    </button>
+                                </div>
+                                <div class="flex items-center space-x-4">
+                                    <span class="text-sm text-gray-600 dark:text-gray-400">모드</span>
+                                    <select v-model="form.mode" class="bg-gray-50 dark:bg-darkBg border border-gray-300 dark:border-darkBorder rounded-md px-4 py-1.5 text-sm w-48">
+                                        <option value="정상">정상</option>
+                                        <option value="폭발">폭발</option>
+                                        <option value="지속">지속</option>
+                                    </select>
+                                </div>
+                                <div class="flex items-center">
+                                    <input type="checkbox" id="scheduled" v-model="form.isScheduled" class="w-4 h-4 rounded border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-darkBg text-blue-600">
+                                    <label for="scheduled" class="ml-2 text-sm text-gray-600 dark:text-gray-400 cursor-pointer">예약 제출</label>
+                                </div>
+                            </div>
+                        </div>
 
-@app.get("/")
-def read_index():
-    return FileResponse("index.html")
+                        <!-- 卡密续费 (普通用户可见) -->
+                        <div v-if="!isAdmin" class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-6 flex flex-col justify-between shadow-sm dark:shadow-none">
+                            <div>
+                                <div class="flex items-center space-x-4 mb-6">
+                                    <div class="w-12 h-12 rounded-full bg-indigo-500 flex items-center justify-center text-white text-lg font-bold">U</div>
+                                    <div>
+                                        <div class="flex items-center space-x-2">
+                                            <span class="text-gray-900 dark:text-white font-medium text-lg">{{ username }}</span>
+                                        </div>
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1">만료: {{ expireDateStr }}</div>
+                                    </div>
+                                </div>
+                                
+                                <div class="border-t border-gray-200 dark:border-darkBorder pt-4">
+                                    <h4 class="text-sm font-medium text-gray-900 dark:text-white mb-3">카드 키 갱신</h4>
+                                    <input v-model="renewKey" type="text" placeholder="새 카드 키를 입력하세요" class="w-full bg-gray-50 dark:bg-darkBg border border-gray-300 dark:border-darkBorder rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500 mb-3 uppercase">
+                                    <button @click="renew" :disabled="loading" class="w-full bg-primary hover:bg-blue-600 disabled:bg-gray-500 text-white py-2 rounded-md text-sm transition-colors font-medium">갱신</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 记录表格 -->
+                    <div class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-6 shadow-sm dark:shadow-none">
+                        <div class="flex justify-between items-center mb-6">
+                            <h3 class="text-base font-medium text-gray-900 dark:text-white">제출 기록 <span class="text-sm text-gray-500">({{ records.length }})</span></h3>
+                            <button @click="deleteAll" class="text-xs border border-red-500/50 text-red-500 px-3 py-1.5 rounded hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors">일괄 삭제</button>
+                        </div>
+
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-sm text-gray-600 dark:text-gray-400">
+                                <thead class="text-xs text-gray-500 border-b border-gray-200 dark:border-darkBorder">
+                                    <tr>
+                                        <th class="py-3 px-4 font-normal">휴대폰 번호</th>
+                                        <th class="py-3 px-4 font-normal">상태 표시</th>
+                                        <th class="py-3 px-4 font-normal">상태</th>
+                                        <th class="py-3 px-4 font-normal">시간</th>
+                                        <th class="py-3 px-4 font-normal text-right">작업</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-if="records.length === 0">
+                                        <td colspan="5" class="text-center py-8 text-gray-400 dark:text-gray-600">제출 기록이 없습니다</td>
+                                    </tr>
+                                    <tr v-for="item in records" :key="item.id" class="border-b border-gray-100 dark:border-darkBorder hover:bg-gray-50 dark:hover:bg-[#1c2128]">
+                                        <td class="py-4 px-4 text-gray-900 dark:text-white">{{ item.phone }}</td>
+                                        <td class="py-4 px-4">
+                                            <span :class="['px-2 py-0.5 text-xs rounded border', 
+                                                item.tag === '폭발' ? 'border-red-200 text-red-500 bg-red-50 dark:border-red-500/30 dark:text-red-400 dark:bg-red-500/10' : 
+                                                item.tag === '지속' ? 'border-yellow-200 text-yellow-600 bg-yellow-50 dark:border-yellow-500/30 dark:text-yellow-400 dark:bg-yellow-500/10' : 
+                                                'border-blue-200 text-blue-600 bg-blue-50 dark:border-blue-500/30 dark:text-blue-400 dark:bg-blue-500/10']">
+                                                {{ item.tag }}
+                                            </span>
+                                        </td>
+                                        <td class="py-4 px-4">
+                                            <span :class="['px-2 py-0.5 text-xs rounded', item.status === '완료됨' ? 'text-green-500' : 'text-yellow-500']">
+                                                {{ item.status }}
+                                            </span>
+                                        </td>
+                                        <td class="py-4 px-4">{{ item.time }}</td>
+                                        <td class="py-4 px-4 text-right">
+                                            <button @click="deleteRecord(item.id)" class="text-red-500 text-xs px-2 py-1 rounded hover:bg-red-50 dark:hover:bg-red-500/10">삭제</button>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ======== 访问 IP 日志 (管理员) ======== -->
+                <div v-if="currentTab === 'visits' && isAdmin" class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-6">
+                    <h3 class="text-base font-medium text-gray-900 dark:text-white mb-4">접속 IP 기록 (최근 100건)</h3>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-left text-sm text-gray-600 dark:text-gray-400">
+                            <thead class="text-xs text-gray-500 border-b border-gray-200 dark:border-darkBorder">
+                                <tr>
+                                    <th class="py-3 px-4 font-normal">IP 주소</th>
+                                    <th class="py-3 px-4 font-normal">접속 경로</th>
+                                    <th class="py-3 px-4 font-normal">시간</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="v in visitLogs" :key="v.id" class="border-b border-gray-100 dark:border-darkBorder">
+                                    <td class="py-4 px-4 text-gray-900 dark:text-white">{{ v.ip }}</td>
+                                    <td class="py-4 px-4">{{ v.path }}</td>
+                                    <td class="py-4 px-4">{{ v.time }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- ======== 卡密管理 (管理员) ======== -->
+                <div v-if="currentTab === 'cards' && isAdmin" class="space-y-6">
+                    <!-- 生成卡密 -->
+                    <div class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-6">
+                        <h3 class="text-base font-medium text-gray-900 dark:text-white mb-4">카드 키 생성</h3>
+                        <div class="flex flex-wrap items-end gap-4">
+                            <div>
+                                <label class="block text-xs text-gray-500 mb-1">사용 기간</label>
+                                <div class="flex space-x-2">
+                                    <button @click="cardForm.days = 1" :class="['px-3 py-1.5 rounded border text-sm', cardForm.days === 1 ? 'bg-primary text-white border-primary' : 'border-gray-300 dark:border-darkBorder hover:bg-gray-50 dark:hover:bg-gray-800']">1일</button>
+                                    <button @click="cardForm.days = 7" :class="['px-3 py-1.5 rounded border text-sm', cardForm.days === 7 ? 'bg-primary text-white border-primary' : 'border-gray-300 dark:border-darkBorder hover:bg-gray-50 dark:hover:bg-gray-800']">7일</button>
+                                    <button @click="cardForm.days = 30" :class="['px-3 py-1.5 rounded border text-sm', cardForm.days === 30 ? 'bg-primary text-white border-primary' : 'border-gray-300 dark:border-darkBorder hover:bg-gray-50 dark:hover:bg-gray-800']">30일</button>
+                                    <input type="number" v-model="cardForm.days" class="w-20 bg-gray-50 dark:bg-darkBg border border-gray-300 dark:border-darkBorder rounded px-3 py-1.5 text-sm" placeholder="사용자 정의">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-500 mb-1">생성 수량</label>
+                                <input type="number" v-model="cardForm.count" class="w-24 bg-gray-50 dark:bg-darkBg border border-gray-300 dark:border-darkBorder rounded px-3 py-1.5 text-sm">
+                            </div>
+                            <button @click="generateCards" :disabled="loading" class="px-6 py-1.5 bg-primary hover:bg-blue-600 text-white rounded font-medium text-sm transition-colors">
+                                생성하기
+                            </button>
+                        </div>
+                        <div v-if="generatedKeys.length > 0" class="mt-4 p-4 bg-gray-50 dark:bg-[#1c2128] rounded border border-gray-200 dark:border-darkBorder">
+                            <p class="text-sm text-green-500 mb-2">생성 완료!</p>
+                            <div class="flex flex-wrap gap-2">
+                                <span v-for="key in generatedKeys" :key="key" class="px-2 py-1 bg-white dark:bg-darkBg border border-gray-300 dark:border-darkBorder text-xs rounded select-all">{{ key }}</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 列表 -->
+                    <div class="bg-white dark:bg-darkCard border border-gray-200 dark:border-darkBorder rounded-lg p-6">
+                        <h3 class="text-base font-medium text-gray-900 dark:text-white mb-4">발급된 카드 키 (최근 100건)</h3>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-sm text-gray-600 dark:text-gray-400">
+                                <thead class="text-xs text-gray-500 border-b border-gray-200 dark:border-darkBorder">
+                                    <tr>
+                                        <th class="py-3 px-4 font-normal">카드 키</th>
+                                        <th class="py-3 px-4 font-normal">기간</th>
+                                        <th class="py-3 px-4 font-normal">상태</th>
+                                        <th class="py-3 px-4 font-normal">사용자</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr v-for="c in allCards" :key="c.id" class="border-b border-gray-100 dark:border-darkBorder">
+                                        <td class="py-4 px-4 font-mono text-gray-900 dark:text-white">{{ c.card_key }}</td>
+                                        <td class="py-4 px-4">{{ c.days }} 일</td>
+                                        <td class="py-4 px-4">
+                                            <span :class="c.is_used ? 'text-red-500' : 'text-green-500'">{{ c.is_used ? '사용됨' : '미사용' }}</span>
+                                        </td>
+                                        <td class="py-4 px-4">{{ c.used_by || '-' }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </template>
+</div>
+
+<script>
+    const { createApp, ref, computed, onMounted, watch } = Vue;
+    const API_BASE = '/api';
+
+    createApp({
+        setup() {
+            const isCollapsed = ref(false);
+            const isDark = ref(true);
+            const isLoggedIn = ref(false);
+            const isAdmin = ref(false);
+            const currentTab = ref('dashboard'); 
+            const loading = ref(false);
+            const token = ref(localStorage.getItem('dove_token') || '');
+            
+            const authMode = ref('card');
+            const authForm = ref({ username: '', password: '', cardKey: '' }); 
+            
+            const username = ref('');
+            const expireDate = ref(0);
+            const records = ref([]);
+            const form = ref({ phone: '', mode: '정상', isScheduled: false });
+            const renewKey = ref('');
+
+            const visitLogs = ref([]);
+            const allCards = ref([]);
+            const generatedKeys = ref([]);
+            const cardForm = ref({ days: 30, count: 1 });
+
+            const apiRequest = async (endpoint, options = {}) => {
+                const headers = { ...options.headers };
+                if (endpoint === '/login') {
+                    headers['Content-Type'] = 'application/x-www-form-urlencoded';
+                    const params = new URLSearchParams();
+                    params.append('username', authForm.value.username);
+                    params.append('password', authForm.value.password);
+                    options.body = params.toString();
+                } else {
+                    headers['Content-Type'] = 'application/json';
+                }
+                if (token.value) headers['Authorization'] = `Bearer ${token.value}`;
+                
+                try {
+                    const response = await fetch(`${API_BASE}${endpoint}`, { ...options, headers });
+                    const contentType = response.headers.get("content-type");
+                    if (!contentType || !contentType.includes("application/json")) {
+                        throw new Error(`서버 응답 오류 (HTTP ${response.status})`);
+                    }
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.detail || '요청 실패');
+                    return data;
+                } catch (err) {
+                    if (err.name === 'TypeError' && err.message.includes('fetch')) {
+                        throw new Error('네트워크 실패! 백엔드 서버 상태를 확인하세요.');
+                    }
+                    throw err;
+                }
+            };
+
+            const doAuth = async () => {
+                loading.value = true;
+                try {
+                    let res;
+                    if (authMode.value === 'login') {
+                        res = await apiRequest('/login', { method: 'POST' });
+                    } else {
+                        res = await apiRequest('/login_by_card', { method: 'POST', body: JSON.stringify({ cardKey: authForm.value.cardKey }) });
+                    }
+                    
+                    token.value = res.access_token;
+                    localStorage.setItem('dove_token', res.access_token);
+                    isLoggedIn.value = true;
+                    isAdmin.value = res.is_admin;
+                    username.value = res.username;
+                    
+                    await fetchUserInfo();
+                    if(isAdmin.value) currentTab.value = 'visits';
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    loading.value = false;
+                }
+            };
+
+            const doLogout = () => {
+                isLoggedIn.value = false;
+                isAdmin.value = false;
+                token.value = '';
+                localStorage.removeItem('dove_token');
+                currentTab.value = 'dashboard';
+            };
+
+            const fetchUserInfo = async () => {
+                try {
+                    const res = await apiRequest('/userinfo');
+                    username.value = res.username;
+                    expireDate.value = res.expireTime * 1000;
+                    records.value = res.records;
+                    isAdmin.value = res.is_admin;
+                } catch (err) {
+                    doLogout();
+                }
+            };
+
+            const fetchAdminData = async () => {
+                if (!isAdmin.value) return;
+                if (currentTab.value === 'visits') {
+                    visitLogs.value = await apiRequest('/admin/visits');
+                } else if (currentTab.value === 'cards') {
+                    allCards.value = await apiRequest('/admin/cards');
+                }
+            };
+
+            watch(currentTab, () => { fetchAdminData(); });
+
+            const generateCards = async () => {
+                loading.value = true;
+                generatedKeys.value = [];
+                try {
+                    const res = await apiRequest('/admin/generate_card', {
+                        method: 'POST',
+                        body: JSON.stringify(cardForm.value)
+                    });
+                    generatedKeys.value = res.keys;
+                    await fetchAdminData();
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    loading.value = false;
+                }
+            };
+
+            const submitPhone = async () => {
+                if (!form.value.phone || form.value.phone.length !== 11) return alert('올바른 11자리 번호를 입력하세요.');
+                loading.value = true;
+                try {
+                    const res = await apiRequest('/submit', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            phone: form.value.phone,
+                            tag: form.value.mode,
+                            isScheduled: form.value.isScheduled
+                        })
+                    });
+                    records.value = res.records;
+                    form.value.phone = '';
+                    form.value.isScheduled = false;
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    loading.value = false;
+                }
+            };
+
+            const renew = async () => {
+                if (!renewKey.value) return alert('카드 키를 입력하세요.');
+                loading.value = true;
+                try {
+                    const res = await apiRequest('/renew', {
+                        method: 'POST',
+                        body: JSON.stringify({ cardKey: renewKey.value })
+                    });
+                    expireDate.value = res.expireTime * 1000;
+                    renewKey.value = '';
+                    alert(res.message);
+                } catch (err) {
+                    alert(err.message);
+                } finally {
+                    loading.value = false;
+                }
+            };
+
+            const deleteRecord = async (id) => {
+                if (!confirm('이 기록을 삭제하시겠습니까?')) return;
+                try {
+                    const res = await apiRequest(`/records/${id}`, { method: 'DELETE' });
+                    records.value = res.records;
+                } catch (err) { alert(err.message); }
+            };
+
+            const deleteAll = async () => {
+                if (!confirm('모든 기록을 삭제하시겠습니까?')) return;
+                for (let r of records.value) {
+                    await apiRequest(`/records/${r.id}`, { method: 'DELETE' });
+                }
+                await fetchUserInfo();
+            };
+
+            const remainingDays = computed(() => {
+                if (!expireDate.value) return 0;
+                const diff = expireDate.value - Date.now();
+                return diff > 0 ? Math.ceil(diff / (1000 * 60 * 60 * 24)) : 0;
+            });
+
+            const expireDateStr = computed(() => {
+                if (!expireDate.value) return '---';
+                return new Date(expireDate.value).toLocaleString('ko-KR', { hour12: false }).replace(/\. /g, '-').replace('.', '');
+            });
+
+            const submittedCount = computed(() => records.value.filter(r => r.status === '완료됨').length);
+            const scheduledCount = computed(() => records.value.filter(r => r.status === '예약 중').length);
+
+            const toggleTheme = () => {
+                isDark.value = !isDark.value;
+                document.documentElement.classList.toggle('dark');
+            };
+
+            onMounted(() => {
+                if (isDark.value) document.documentElement.classList.add('dark');
+                if (token.value) {
+                    isLoggedIn.value = true;
+                    fetchUserInfo().then(() => {
+                        if(isAdmin.value) currentTab.value = 'visits';
+                    });
+                }
+            });
+
+            return {
+                isCollapsed, isDark, isLoggedIn, isAdmin, currentTab, loading, 
+                authMode, authForm, username, expireDate, records, form, renewKey,
+                visitLogs, allCards, generatedKeys, cardForm,
+                remainingDays, expireDateStr, submittedCount, scheduledCount,
+                doAuth, doLogout, toggleTheme, submitPhone, renew, deleteRecord, deleteAll, generateCards
+            };
+        }
+    }).mount('#app');
+</script>
+</body>
+</html>
