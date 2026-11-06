@@ -37,6 +37,7 @@ async function bootstrap() {
 
   const dataKeyBase64 = (() => {
     const decoded = Buffer.from(dataKeyRaw, "base64");
+
     return (
       decoded.length === 32 &&
       decoded.toString("base64") === dataKeyRaw
@@ -80,7 +81,8 @@ async function bootstrap() {
     (req: any, res: any, next: (error?: any) => void) => {
       const now = Date.now();
       const path = String(req.path || "");
-      const ip = req.ip || req.socket?.remoteAddress || "unknown";
+      const ip =
+        req.ip || req.socket?.remoteAddress || "unknown";
 
       const sensitiveAuth =
         req.method === "POST" &&
@@ -151,7 +153,10 @@ async function bootstrap() {
 
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("X-Frame-Options", "DENY");
-      res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
+      res.setHeader(
+        "X-Permitted-Cross-Domain-Policies",
+        "none"
+      );
 
       res.setHeader(
         "Referrer-Policy",
@@ -184,18 +189,54 @@ async function bootstrap() {
   // 5. CORS Configuration
   // =========================
 
+  // Normalize origins to prevent mismatches caused by:
+  // spaces, trailing slashes, paths, or surrounding quotes.
+
+  const normalizeOrigin = (value: string): string => {
+    const cleaned = value
+      .trim()
+      .replace(/^["']|["']$/g, "");
+
+    try {
+      return new URL(cleaned).origin;
+    } catch {
+      return cleaned.replace(/\/+$/, "");
+    }
+  };
+
+  // Read allowed frontend origins from environment variables.
+
   const origins = (
     process.env.APP_ORIGIN ?? "http://localhost:3000"
   )
     .split(",")
-    .map((v) => v.trim())
+    .map(normalizeOrigin)
     .filter(Boolean);
+
+  // Log allowed origins for deployment diagnostics.
+
+  console.log(
+    `[CORS] Allowed origins: ${
+      origins.join(", ") || "(empty)"
+    }`
+  );
+
+  // Validate incoming request origins.
 
   app.use(
     (req: any, res: any, next: (error?: any) => void) => {
-      const origin = req.headers.origin;
+      const rawOrigin = req.headers.origin;
+
+      const origin =
+        typeof rawOrigin === "string"
+          ? normalizeOrigin(rawOrigin)
+          : "";
 
       if (origin && !origins.includes(origin)) {
+        console.warn(
+          `[CORS] Blocked origin: ${origin}; allowed: ${origins.join(", ")}`
+        );
+
         res.status(403).json({
           statusCode: 403,
           message: "来源不被允许",
@@ -207,6 +248,8 @@ async function bootstrap() {
       next();
     }
   );
+
+  // Configure Express CORS.
 
   app.enableCors({
     origin: origins,
