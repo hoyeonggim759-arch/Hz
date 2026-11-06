@@ -1,40 +1,76 @@
 
+databases:
+  - name: jinqsms-hz-db
+    databaseName: jinqsms
+    user: jinqsms
+    plan: free
+    region: oregon
+
 services:
-  # NestJS 后端
+  # =========================
+  # 1. NestJS API 后端
+  # =========================
   - type: web
-    name: jinqsms-api
+    name: jinqsms-hz-api
     runtime: node
     plan: free
-    region: singapore
+    region: oregon
+
     buildCommand: npm install --include=dev && npm run db:generate && npm run build:api
+
     startCommand: npm run db:deploy && npm run start:api
+
+    healthCheckPath: /healthz
+
     envVars:
       - key: NODE_ENV
         value: production
+
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: jinqsms-hz-db
+          property: connectionString
+
       - key: SESSION_SECRET
         generateValue: true
+
       - key: LICENSE_PEPPER
         generateValue: true
+
       - key: APP_DATA_KEY
         generateValue: true
+
+      - key: APP_ORIGIN
+        value: https://jinqsms-hz-web.onrender.com
+
+      - key: TRUST_PROXY
+        value: "1"
+
       - key: ADMIN_LOGIN_ID
         sync: false
+
       - key: ADMIN_PASSWORD
         sync: false
 
-  # Next.js 前端
+  # =========================
+  # 2. Next.js 前端
+  # =========================
   - type: web
-    name: jinqsms-web
+    name: jinqsms-hz-web
     runtime: node
     plan: free
-    region: singapore
+    region: oregon
+
     buildCommand: npm install --include=dev && npm run build:web
+
     startCommand: npm run start:web
+
     envVars:
       - key: NODE_ENV
         value: production
+
       - key: NEXT_PUBLIC_API_URL
         value: /api
 
+      - key: API_ORIGIN
+        value: https://jinqsms-hz-api.onrender.com
