@@ -81,7 +81,8 @@ async function bootstrap() {
     (req: any, res: any, next: (error?: any) => void) => {
       const now = Date.now();
       const path = String(req.path || "");
-      const ip = req.ip || req.socket?.remoteAddress || "unknown";
+      const ip =
+        req.ip || req.socket?.remoteAddress || "unknown";
 
       const sensitiveAuth =
         req.method === "POST" &&
@@ -152,7 +153,10 @@ async function bootstrap() {
 
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("X-Frame-Options", "DENY");
-      res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
+      res.setHeader(
+        "X-Permitted-Cross-Domain-Policies",
+        "none"
+      );
 
       res.setHeader(
         "Referrer-Policy",
@@ -186,10 +190,10 @@ async function bootstrap() {
   // =========================
 
   // Normalize origin:
-  // - Remove surrounding spaces
+  // - Remove spaces
   // - Remove surrounding quotes
   // - Remove paths and trailing slashes
-  // - Normalize to protocol + hostname + port
+  // - Keep protocol, hostname and port
 
   const normalizeOrigin = (value: string): string => {
     const cleaned = value
@@ -207,25 +211,41 @@ async function bootstrap() {
     }
   };
 
-  // Read allowed origins from APP_ORIGIN.
-  // Multiple origins can be separated by commas.
+  // Read APP_ORIGIN from Render environment variables.
 
-  const origins = (
-    process.env.APP_ORIGIN ?? "http://localhost:3000"
+  const configuredOrigins = (
+    process.env.APP_ORIGIN ?? ""
   )
     .split(",")
     .map(normalizeOrigin)
     .filter(Boolean);
 
-  // Log the actual allowed origins.
+  // Explicitly trust the actual JinqSMS frontend domain.
+  // Localhost is retained only for development.
 
-  console.log(
-    `[CORS] Allowed origins: ${
-      origins.join(", ") || "(empty)"
-    }`
+  const defaultOrigins = [
+    "https://hz-2-kihm.onrender.com",
+    ...(process.env.NODE_ENV === "production"
+      ? []
+      : ["http://localhost:3000"]),
+  ];
+
+  // Combine and remove duplicate origins.
+
+  const origins = Array.from(
+    new Set([
+      ...defaultOrigins,
+      ...configuredOrigins,
+    ])
   );
 
-  // Check incoming request origin.
+  // Print the actual whitelist at startup.
+
+  console.log(
+    `[CORS] Allowed origins: ${origins.join(", ")}`
+  );
+
+  // Validate incoming requests.
 
   app.use(
     (req: any, res: any, next: (error?: any) => void) => {
@@ -236,13 +256,9 @@ async function bootstrap() {
           ? normalizeOrigin(rawOrigin)
           : "";
 
-      // Reject requests from origins not in the whitelist.
-
       if (origin && !origins.includes(origin)) {
         console.warn(
-          `[CORS] Blocked origin: ${origin}; allowed: ${
-            origins.join(", ") || "(empty)"
-          }`
+          `[CORS] Blocked origin: ${origin}; allowed: ${origins.join(", ")}`
         );
 
         res.status(403).json({
