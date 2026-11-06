@@ -81,8 +81,7 @@ async function bootstrap() {
     (req: any, res: any, next: (error?: any) => void) => {
       const now = Date.now();
       const path = String(req.path || "");
-      const ip =
-        req.ip || req.socket?.remoteAddress || "unknown";
+      const ip = req.ip || req.socket?.remoteAddress || "unknown";
 
       const sensitiveAuth =
         req.method === "POST" &&
@@ -153,10 +152,7 @@ async function bootstrap() {
 
       res.setHeader("X-Content-Type-Options", "nosniff");
       res.setHeader("X-Frame-Options", "DENY");
-      res.setHeader(
-        "X-Permitted-Cross-Domain-Policies",
-        "none"
-      );
+      res.setHeader("X-Permitted-Cross-Domain-Policies", "none");
 
       res.setHeader(
         "Referrer-Policy",
@@ -189,13 +185,20 @@ async function bootstrap() {
   // 5. CORS Configuration
   // =========================
 
-  // Normalize origins to prevent mismatches caused by:
-  // spaces, trailing slashes, paths, or surrounding quotes.
+  // Normalize origin:
+  // - Remove surrounding spaces
+  // - Remove surrounding quotes
+  // - Remove paths and trailing slashes
+  // - Normalize to protocol + hostname + port
 
   const normalizeOrigin = (value: string): string => {
     const cleaned = value
       .trim()
       .replace(/^["']|["']$/g, "");
+
+    if (!cleaned) {
+      return "";
+    }
 
     try {
       return new URL(cleaned).origin;
@@ -204,7 +207,8 @@ async function bootstrap() {
     }
   };
 
-  // Read allowed frontend origins from environment variables.
+  // Read allowed origins from APP_ORIGIN.
+  // Multiple origins can be separated by commas.
 
   const origins = (
     process.env.APP_ORIGIN ?? "http://localhost:3000"
@@ -213,7 +217,7 @@ async function bootstrap() {
     .map(normalizeOrigin)
     .filter(Boolean);
 
-  // Log allowed origins for deployment diagnostics.
+  // Log the actual allowed origins.
 
   console.log(
     `[CORS] Allowed origins: ${
@@ -221,7 +225,7 @@ async function bootstrap() {
     }`
   );
 
-  // Validate incoming request origins.
+  // Check incoming request origin.
 
   app.use(
     (req: any, res: any, next: (error?: any) => void) => {
@@ -232,9 +236,13 @@ async function bootstrap() {
           ? normalizeOrigin(rawOrigin)
           : "";
 
+      // Reject requests from origins not in the whitelist.
+
       if (origin && !origins.includes(origin)) {
         console.warn(
-          `[CORS] Blocked origin: ${origin}; allowed: ${origins.join(", ")}`
+          `[CORS] Blocked origin: ${origin}; allowed: ${
+            origins.join(", ") || "(empty)"
+          }`
         );
 
         res.status(403).json({
@@ -249,7 +257,7 @@ async function bootstrap() {
     }
   );
 
-  // Configure Express CORS.
+  // Configure NestJS / Express CORS.
 
   app.enableCors({
     origin: origins,
