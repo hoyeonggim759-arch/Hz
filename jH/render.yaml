@@ -1,0 +1,75 @@
+# JinqSMS Render Blueprint
+# Repository layout: the application lives in the repository's jH/ directory.
+# Select this Blueprint file in Render: jH/render.yaml
+
+services:
+  - type: web
+    name: jinqsms-api
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: jH
+    buildCommand: npm install --include=dev && npm run db:generate && npm run build:api
+    startCommand: npm run db:deploy && node scripts/bootstrap-admin.cjs && npm run start:api
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.23.4
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: jinqsms-db
+          property: connectionString
+      - key: MIGRATION_DATABASE_URL
+        fromDatabase:
+          name: jinqsms-db
+          property: connectionString
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: LICENSE_PEPPER
+        generateValue: true
+      - key: APP_DATA_KEY
+        generateValue: true
+      - key: ADMIN_LOGIN_ID
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: APP_ORIGIN
+        fromService:
+          type: web
+          name: jinqsms-web
+          envVarKey: RENDER_EXTERNAL_URL
+
+  - type: web
+    name: jinqsms-web
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: jH
+    buildCommand: npm install --include=dev && npm run build:web
+    startCommand: npm run start:web
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 22.23.4
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_API_URL
+        value: /api
+      - key: API_ORIGIN
+        fromService:
+          type: web
+          name: jinqsms-api
+          envVarKey: RENDER_EXTERNAL_URL
+
+databases:
+  - name: jinqsms-db
+    databaseName: jinqsms
+    user: jinqsms_app
+    plan: free
+    region: singapore
+    postgresMajorVersion: "17"
+    ipAllowList: []
