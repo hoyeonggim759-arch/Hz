@@ -1,0 +1,23 @@
+{
+  "name": "krsms-vps",
+  "version": "1.0.0",
+  "private": true,
+  "description": "KRSMS Korean-language user/admin portal for a single Ubuntu VPS",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "db:migrate": "node db/migrate.js",
+    "admin:create": "node scripts/bootstrap-admin.js",
+    "check": "node --check server.js && node --check public/user.js && node --check public/admin.js && node --check lib/crypto.js && node --check lib/api-config-store.js && node --check scripts/bootstrap-admin.js && node --check worker/task-plugin.example.js"
+  },
+  "engines": { "node": ">=22.11.0 <23" },
+  "dependencies": {
+    "bcryptjs": "2.4.3",
+    "cookie-parser": "1.4.7",
+    "express": "4.21.2",
+    "express-rate-limit": "7.5.0",
+    "helmet": "8.0.0",
+    "pg": "8.13.1",
+    "zod": "3.24.1"
+  }
+}

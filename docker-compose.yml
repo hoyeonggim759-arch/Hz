@@ -1,0 +1,82 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - backend
+
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN}
+      DATABASE_URL: ${DATABASE_URL}
+      SESSION_SECRET: ${SESSION_SECRET}
+      LICENSE_PEPPER: ${LICENSE_PEPPER}
+      APP_DATA_KEY: ${APP_DATA_KEY}
+      API_CONFIG_KEY: ${API_CONFIG_KEY}
+      DATA_DIR: /data
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      TRUST_PROXY_HOPS: 1
+      BOOTSTRAP_ADMIN_ON_START: ${BOOTSTRAP_ADMIN_ON_START:-false}
+      ADMIN_LOGIN_ID: ${ADMIN_LOGIN_ID:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    volumes:
+      - krsms_data:/data
+    expose:
+      - "3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+      - frontend
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    networks:
+      - frontend
+
+volumes:
+  postgres_data:
+  krsms_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  backend:
+    internal: true
+  frontend: {}
