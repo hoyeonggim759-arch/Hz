@@ -1,4 +1,3 @@
-
 'use strict';
 
 const express = require('express');
@@ -129,13 +128,50 @@ app.use(
 app.use(express.json({ limit: '32kb' }));
 app.use(cookieParser());
 
-app.use(
-  express.static(path.join(__dirname, 'public'), {
-    extensions: ['html'],
-    index: false,
-    maxAge: '1h',
-  })
-);
+// Admin UI files are NOT public static assets.
+// Only authenticated administrators can download them.
+
+function protectedAdminFile(fileName) {
+  return [
+    requireAuth,
+    requireAdmin,
+    (req, res, next) => {
+      res.set('Cache-Control', 'private, no-store, max-age=0');
+      res.set('Pragma', 'no-cache');
+
+      res.sendFile(
+        path.join(__dirname, 'public', fileName),
+        { cacheControl: false },
+        (err) => {
+          if (err) next(err);
+        }
+      );
+    },
+  ];
+}
+
+app.get(['/admin', '/admin.html'], ...protectedAdminFile('admin.html'));
+app.get('/admin.js', ...protectedAdminFile('admin.js'));
+
+// Only explicitly approved public files are accessible.
+
+function publicAsset(fileName) {
+  return (req, res, next) => {
+    res.set('Cache-Control', 'public, max-age=3600');
+
+    res.sendFile(
+      path.join(__dirname, 'public', fileName),
+      { cacheControl: false },
+      (err) => {
+        if (err) next(err);
+      }
+    );
+  };
+}
+
+app.get('/index.html', publicAsset('index.html'));
+app.get('/styles.css', publicAsset('styles.css'));
+app.get('/user.js', publicAsset('user.js'));
 
 // =========================
 // 4. RATE LIMITING
@@ -223,7 +259,17 @@ function sendError(res, status, message) {
 function validateOrigin(req, res, next) {
   const origin = req.get('origin');
 
-  if (origin && origin !== PUBLIC_ORIGIN) {
+  const isStateChangingMethod = [
+    'POST',
+    'PUT',
+    'PATCH',
+    'DELETE',
+  ].includes(req.method);
+
+  if (
+    (origin && origin !== PUBLIC_ORIGIN) ||
+    (isStateChangingMethod && origin !== PUBLIC_ORIGIN)
+  ) {
     return sendError(
       res,
       403,
@@ -234,7 +280,12 @@ function validateOrigin(req, res, next) {
   next();
 }
 
-app.use('/api', validateOrigin);
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'private, no-store, max-age=0');
+  res.set('Pragma', 'no-cache');
+
+  next();
+}, validateOrigin);
 
 // =========================
 // 7. AUDIT LOG
@@ -271,7 +322,11 @@ async function audit(
 async function loadUser(req) {
   const token = req.cookies.krsms_session;
 
-  if (!token || token.length < 32) {
+  if (
+    typeof token !== 'string' ||
+    token.length !== 43 ||
+    !/^[A-Za-z0-9_-]{43}$/.test(token)
+  ) {
     return null;
   }
 
@@ -281,8 +336,6 @@ async function loadUser(req) {
        u.username,
        u.role,
        u.status,
-       u.registration_ip,
-       u.last_login_ip,
        u.created_at
      FROM sessions s
      JOIN users u ON u.id = s.user_id
@@ -345,16 +398,7 @@ function issueSession(res, token) {
 // =========================
 
 app.get('/healthz', (_req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'KRSMS',
-  });
-});
-
-app.get('/admin', (_req, res) => {
-  res.sendFile(
-    path.join(__dirname, 'public', 'admin.html')
-  );
+  res.json({ status: 'ok' });
 });
 
 app.get('/', (_req, res) => {
@@ -623,9 +667,26 @@ app.get(
     );
 
     res.json({
-      user: req.user,
-      license: license.rows[0] || null,
-      stats: stats.rows[0],
+      user: {
+        id: req.user.id,
+        username: req.user.username,
+        role: req.user.role,
+        created_at: req.user.created_at,
+      },
+      license: license.rows[0]
+        ? {
+            code_hint: license.rows[0].code_hint,
+            duration_days: license.rows[0].duration_days,
+            starts_at: license.rows[0].starts_at,
+            expires_at: license.rows[0].expires_at,
+            status: license.rows[0].status,
+          }
+        : null,
+      stats: {
+        total: stats.rows[0].total,
+        completed: stats.rows[0].completed,
+        running: stats.rows[0].running,
+      },
     });
   })
 );
@@ -784,10 +845,16 @@ app.get(
       [req.user.id]
     );
 
+    // Explicit allowlist: never spread database rows into API responses.
+    // In particular, phone_ciphertext must remain server-side.
     res.json({
       tasks: result.rows.map(t => ({
-        ...t,
+        id: t.id,
         phone: safeDecryptPhone(t.phone_ciphertext),
+        duration_minutes: t.duration_minutes,
+        status: t.status,
+        created_at: t.created_at,
+        ends_at: t.ends_at,
       })),
     });
   })
@@ -874,10 +941,6 @@ app.post(
       Date.now() +
       parsed.data.durationMinutes * 60000
     );
-
-    // Safe default:
-    // Record and monitor the authorized task only.
-    // No external SMS requests are executed by default.
 
     const result = await pool.query(
       `INSERT INTO tasks
@@ -1911,9 +1974,6 @@ app.delete(
 // =========================
 // 40. TASK EXPIRATION
 // =========================
-
-// This only expires task monitoring windows.
-// It does not send SMS or make external API requests.
 
 setInterval(() => {
   pool.query(
